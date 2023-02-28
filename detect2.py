@@ -28,7 +28,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
-
+import numpy as np
 import cv2
 import torch
 import torch.backends.cudnn as cudnn
@@ -41,12 +41,11 @@ if str(ROOT) not in sys.path:
 ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
 from models.common import DetectMultiBackend
-from utils.datasets import IMG_FORMATS, VID_FORMATS, LoadImages, LoadStreams
+from utils.datasets2 import IMG_FORMATS, VID_FORMATS, LoadImages, LoadStreams
 from utils.general import (LOGGER, check_file, check_img_size, check_imshow, check_requirements, colorstr,
                            increment_path, non_max_suppression, print_args, scale_coords, strip_optimizer, xyxy2xywh)
 from utils.plots import Annotator, colors, save_one_box
 from utils.torch_utils import select_device, time_sync
-
 
 @torch.no_grad()
 def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
@@ -103,7 +102,9 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
     if webcam:
         view_img = check_imshow()
         cudnn.benchmark = True  # set True to speed up constant image size inference
-        dataset = LoadStreams(source, img_size=imgsz, stride=stride, auto=pt)
+        I_WIDTH=1280
+        I_HEIGHT=480
+        dataset = LoadStreams(source, img_size=imgsz, stride=stride, auto=pt,Image_Width=I_WIDTH,Image_Height=I_HEIGHT)
         bs = len(dataset)  # batch_size
     else:
         dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt)
@@ -113,48 +114,62 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
     # Run inference
     model.warmup(imgsz=(1 if pt else bs, 3, *imgsz), half=half)  # warmup
     dt, seen = [0.0, 0.0, 0.0], 0
-    for path, im, im0s, vid_cap, s in dataset:
+    for path, (imL,imR), (im0Ls,im0Rs), vid_cap, s in dataset:
+        if not webcam:
+            I_WIDTH,I_HEIGHT=im0Ls.shape[1],im0Ls.shape[0]
         t1 = time_sync()
-        im = torch.from_numpy(im).to(device) #(3,384,640)
-        im = im.half() if half else im.float()  # uint8 to fp16/32
-        im /= 255  # 0 - 255 to 0.0 - 1.0
-        if len(im.shape) == 3:
-            im = im[None]  # expand for batch dim,(batch,channel,Height,width)
+        print("1: Capture time:{:.2f}".format(t1))
+        imL = torch.from_numpy(imL).to(device) #(3,384,640)
+        imL = imL.half() if half else imL.float()  # uint8 to fp16/32
+        imL /= 255  # 0 - 255 to 0.0 - 1.0
+
+        imR = torch.from_numpy(imR).to(device) #(3,384,640)
+        imR = imR.half() if half else imR.float()  # uint8 to fp16/32
+        imR /= 255  # 0 - 255 to 0.0 - 1.0
+
+        if len(imL.shape) == 3:
+            imL = imL[None]  # expand for batch dim
+        
+        if len(imR.shape) == 3:
+            imR = imR[None]  # expand for batch dim
+        
         t2 = time_sync()
         dt[0] += t2 - t1
 
         # Inference
         visualize = increment_path(save_dir / Path(path).stem, mkdir=True) if visualize else False
-        pred = model(im, augment=augment, visualize=visualize)
+        predL = model(imL, augment=augment, visualize=visualize)        
+        predR = model(imR, augment=augment, visualize=visualize)
         t3 = time_sync()
         dt[1] += t3 - t2
 
         # NMS
-        pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
+        predL = non_max_suppression(predL, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
+        predR = non_max_suppression(predR, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
         dt[2] += time_sync() - t3
-
+        print("2: Detect time:{:.2f}".format(time_sync()))
         # Second-stage classifier (optional)
         # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
 
         # Process predictions
-        for i, det in enumerate(pred):  # per image
+        for i, det in enumerate(predL):  # per image
             seen += 1
             if webcam:  # batch_size >= 1
-                p, im0, frame = path[i], im0s[i].copy(), dataset.count
+                p, im0, frame = path[i], im0Ls[i].copy(), dataset.count
                 s += f'{i}: '
             else:
-                p, im0, frame = path, im0s.copy(), getattr(dataset, 'frame', 0)
+                p, im0, frame = path, im0Ls.copy(), getattr(dataset, 'frame', 0)
 
             p = Path(p)  # to Path
             save_path = str(save_dir / p.name)  # im.jpg
             txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # im.txt
-            s += '%gx%g ' % im.shape[2:]  # print string
+            s += '%gx%g ' % imL.shape[2:]  # print string
             gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
             imc = im0.copy() if save_crop else im0  # for save_crop
             annotator = Annotator(im0, line_width=line_thickness, example=str(names))
             if len(det):
                 # Rescale boxes from img_size to im0 size
-                det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
+                det[:, :4] = scale_coords(imL.shape[2:], det[:, :4], im0.shape).round()
 
                 # Print results
                 for c in det[:, -1].unique():
@@ -172,31 +187,21 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
                     if save_img or save_crop or view_img:  # Add bbox to image
                         c = int(cls)  # integer class
                         label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
-                        if c==32:
+                        if c==0:
                             left,upper,right,down=xyxy
                             left,upper,right,down=int(left),int(upper),int(right),int(down)
                             img_part=im0[upper:down,left:right,:]
                             x,y,r=test_circles(img_part)
                             if r!=0:
-                                print("Orange center is at:{},{},the radis is {}".format(left+x,upper+y,r))
-
-                        if c==49    :
-                            left,upper,right,down=xyxy
-                            left,upper,right,down=int(left),int(upper),int(right),int(down)
-                            img_part=im0[upper:down,left:right,:]
-                            x,y,r=test_circles(img_part)
-                            if r!=0:
-                                print("Sport Ball center is at:{},{},the radis is {}".format(left+x,upper+y,r))
-
+                                print("In Left view: center is at:    {},    {},the radis is    {}".format(left+x,upper+y,r))
+                            else:
+                                print("In Left view: No circles!")
                         annotator.box_label(xyxy, label, color=colors(c, True))
                         if save_crop:
                             save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
 
             # Stream results
-            im0 = annotator.result() #process the results,(Height,Weight,Channel)
-            if view_img:
-                cv2.imshow(str(p), im0)
-                cv2.waitKey(1)  # 1 millisecond
+            im0L = annotator.result() #process the results,(Height,Weight,Channel)
 
             # Save results (image with detections)
             if save_img:
@@ -217,9 +222,91 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
                         save_path = str(Path(save_path).with_suffix('.mp4'))  # force *.mp4 suffix on results videos
                         vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
                     vid_writer[i].write(im0)
+            # Print time (inference-only)
+            # LOGGER.info(f'{s}Done. ({t3 - t2:.3f}s)')
 
-        # Print time (inference-only)
-        LOGGER.info(f'{s}Done. ({t3 - t2:.3f}s)')
+        for i, det in enumerate(predR):  # per image
+            seen += 1
+            if webcam:  # batch_size >= 1
+                p, im0, frame = path[i], im0Rs[i].copy(), dataset.count
+                s += f'{i}: '
+            else:
+                p, im0, frame = path, im0Rs.copy(), getattr(dataset, 'frame', 0)
+
+            p = Path(p)  # to Path
+            save_path = str(save_dir / p.name)  # im.jpg
+            txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # im.txt
+            s += '%gx%g ' % imR.shape[2:]  # print string
+            gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
+            imc = im0.copy() if save_crop else im0  # for save_crop
+            annotator = Annotator(im0, line_width=line_thickness, example=str(names))
+            if len(det):
+                # Rescale boxes from img_size to im0 size
+                det[:, :4] = scale_coords(imR.shape[2:], det[:, :4], im0.shape).round()
+
+                # Print results
+                for c in det[:, -1].unique():
+                    n = (det[:, -1] == c).sum()  # detections per class
+                    s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+
+                # Write results
+                for *xyxy, conf, cls in reversed(det):
+                    if save_txt:  # Write to file
+                        xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
+                        line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # label format
+                        with open(txt_path + '.txt', 'a') as f:
+                            f.write(('%g ' * len(line)).rstrip() % line + '\n')
+
+                    if save_img or save_crop or view_img:  # Add bbox to image
+                        c = int(cls)  # integer class
+                        label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
+                        if c==0:
+                            left,upper,right,down=xyxy
+                            left,upper,right,down=int(left),int(upper),int(right),int(down)
+                            left=max(0,left-10)
+                            upper=max(0,upper-10)
+                            right=min(I_WIDTH//2,right+10)
+                            down=min(I_HEIGHT,down+10)
+                            img_part=im0[upper:down,left:right,:]
+                            x,y,r=test_circles(img_part)
+                            if r!=0:
+                                print("In Right view:center is at:    {},    {},the radis is    {}".format(left+x,upper+y,r))
+                            else:
+                                print("In Right view:no circles!")
+                        annotator.box_label(xyxy, label, color=colors(c, True))
+                        if save_crop:
+                            save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
+
+            # Stream results
+            im0R = annotator.result() #process the results,(Height,Weight,Channel)
+
+            # Save results (image with detections)
+            if save_img:
+                if dataset.mode == 'image':
+                    cv2.imwrite(save_path, im0)
+                else:  # 'video' or 'stream'
+                    if vid_path[i] != save_path:  # new video
+                        vid_path[i] = save_path
+                        if isinstance(vid_writer[i], cv2.VideoWriter):
+                            vid_writer[i].release()  # release previous video writer
+                        if vid_cap:  # video
+                            fps = vid_cap.get(cv2.CAP_PROP_FPS)
+                            w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                            h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                        else:  # stream
+                            fps, w, h = 30, im0.shape[1], im0.shape[0]
+                        
+                        save_path = str(Path(save_path).with_suffix('.mp4'))  # force *.mp4 suffix on results videos
+                        vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+                    vid_writer[i].write(im0)
+            # Print time (inference-only)
+            # LOGGER.info(f'{s}Done. ({t3 - t2:.3f}s)')
+        t4 = time_sync()
+        print("3: Circles time:{:.2f}\n".format(t4))
+        if view_img:
+            imdepl=np.concatenate((im0L,im0R),axis=1)
+            cv2.imshow(str(p), imdepl)
+            cv2.waitKey(1)  # 1 millisecond
 
     # Print results
     t = tuple(x / seen * 1E3 for x in dt)  # speeds per image
@@ -233,14 +320,14 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
 
 def parse_opt():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', nargs='+', type=str, default=ROOT / 'yolov5l.pt', help='model path(s)')
-    parser.add_argument('--source', type=str, default="D:/Engineering_project/pixelxyz/vs2015_demo/Demo_003/VideoTest.avi", help='file/dir/URL/glob, 0 for webcam') #0是右目，1是webcam;./videotest/Left2.bmp
+    parser.add_argument('--weights', nargs='+', type=str, default=ROOT / 'best.pt', help='model path(s)')
+    parser.add_argument('--source', type=str, default="0", help='file/dir/URL/glob, 0 for webcam') #0是摄像机，1是webcam;./videotest/Left2.bmp
     parser.add_argument('--data', type=str, default=ROOT / 'data/coco128.yaml', help='(optional) dataset.yaml path')
     parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[640], help='inference size h,w')
     parser.add_argument('--conf-thres', type=float, default=0.25, help='confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.45, help='NMS IoU threshold')
     parser.add_argument('--max-det', type=int, default=1000, help='maximum detections per image')
-    parser.add_argument('--device', default="cpu", help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument('--device', default="0", help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--view-img', action='store_true', help='show results')
     parser.add_argument('--save-txt', action='store_true', help='save results to *.txt')
     parser.add_argument('--save-conf', action='store_true', help='save confidences in --save-txt labels')

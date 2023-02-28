@@ -1,0 +1,3 @@
+python train.py --img 640 --batch 16 --epochs 3 --data ../ball_data/balls.yaml --weights yolov5l6.pt
+python train.py --img 640 --batch 16 --epochs 80 --data ../ball_data/balls
+.yaml --weights yolov5l.pt

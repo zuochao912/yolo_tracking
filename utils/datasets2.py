@@ -180,6 +180,7 @@ class LoadImages:
         self.video_flag = [False] * ni + [True] * nv
         self.mode = 'image'
         self.auto = auto
+        self.Width=None
         if any(videos):
             self.new_video(videos[0])  # new video
         else:
@@ -200,6 +201,21 @@ class LoadImages:
             # Read video
             self.mode = 'video'
             ret_val, img0 = self.cap.read()
+            if not self.Width:
+                self.Width = img0.shape[1]//2
+            img0L=img0[:,0:self.Width,:]
+            img0R=img0[:,self.Width:,:]
+
+            # Padded resize
+            imgL = letterbox(img0L, self.img_size, stride=self.stride, auto=self.auto)[0]
+            imgR = letterbox(img0R, self.img_size, stride=self.stride, auto=self.auto)[0]
+
+            # Convert
+            imgL = imgL.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
+            imgL = np.ascontiguousarray(imgL)
+            imgR = imgR.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
+            imgR = np.ascontiguousarray(imgR)
+
             while not ret_val:
                 self.count += 1
                 self.cap.release()
@@ -212,6 +228,7 @@ class LoadImages:
 
             self.frame += 1
             s = f'video {self.count + 1}/{self.nf} ({self.frame}/{self.frames}) {path}: '
+            return path, (imgL,imgR), (img0L,img0R), self.cap, s
 
         else:
             # Read image
@@ -222,7 +239,7 @@ class LoadImages:
 
         # Padded resize
         img = letterbox(img0, self.img_size, stride=self.stride, auto=self.auto)[0]
-
+        
         # Convert
         img = img.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
         img = np.ascontiguousarray(img)
@@ -282,10 +299,12 @@ class LoadWebcam:  # for inference
 
 class LoadStreams:
     # YOLOv5 streamloader, i.e. `python detect.py --source 'rtsp://example.com/media.mp4'  # RTSP, RTMP, HTTP streams`
-    def __init__(self, sources='streams.txt', img_size=640, stride=32, auto=True):
+    def __init__(self, sources='streams.txt', img_size=640, stride=32, auto=True,Image_Width=1280,Image_Height=480):
         self.mode = 'stream'
         self.img_size = img_size
         self.stride = stride
+        self.W=int(Image_Width/2)
+        self.H=int(Image_Height)
         if os.path.isfile(sources):
             with open(sources) as f:
                 sources = [x.strip() for x in f.read().strip().splitlines() if len(x.strip())]
@@ -307,6 +326,8 @@ class LoadStreams:
             cap = cv2.VideoCapture(s)
             assert cap.isOpened(), f'{st}Failed to open {s}'
 
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH,Image_Width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT,Image_Height)
             w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) # the width of the frame
             h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             fps = cap.get(cv2.CAP_PROP_FPS)  # warning: may return 0 or nan
@@ -353,17 +374,33 @@ class LoadStreams:
             raise StopIteration
 
         # Letterbox
-        img0 = self.imgs.copy() 
-        img = [letterbox(x, self.img_size, stride=self.stride, auto=self.rect and self.auto)[0] for x in img0]
-
+        # img0 = self.imgs.copy()
+        img0L= self.imgs.copy()
+        img0R= self.imgs.copy()
+        
+        img0L[0]=img0L[0][:,0:self.W,:]
+        img0R[0]=img0R[0][:,self.W:,:]   
+        # img = [letterbox(x, self.img_size, stride=self.stride, auto=self.rect and self.auto)[0] for x in img0]
+        imgL = [letterbox(x, self.img_size, stride=self.stride, auto=self.rect and self.auto)[0] for x in img0L]
+        imgR = [letterbox(x, self.img_size, stride=self.stride, auto=self.rect and self.auto)[0] for x in img0R]
+        
         # Stack
-        img = np.stack(img, 0)
+        # img = np.stack(img, 0)
+        imgL = np.stack(imgL, 0)
+        imgR = np.stack(imgR, 0)
 
         # Convert
-        img = img[..., ::-1].transpose((0, 3, 1, 2))  # BGR to RGB, BHWC to BCHW
-        img = np.ascontiguousarray(img)
 
-        return self.sources, img, img0, None, ''
+        # img = img[..., ::-1].transpose((0, 3, 1, 2))  # BGR to RGB, BHWC to BCHW
+        # img = np.ascontiguousarray(img)
+        imgL = imgL[..., ::-1].transpose((0, 3, 1, 2))  # BGR to RGB, BHWC to BCHW
+        imgL = np.ascontiguousarray(imgL)
+        
+        imgR = imgR[..., ::-1].transpose((0, 3, 1, 2))  # BGR to RGB, BHWC to BCHW
+        imgR = np.ascontiguousarray(imgR)
+
+        # return self.sources, img, img0, None, ''
+        return self.sources, (imgL,imgR), (img0L,img0R), None, ''
 
     def __len__(self):
         return len(self.sources)  # 1E12 frames = 32 streams at 30 FPS for 30 years
